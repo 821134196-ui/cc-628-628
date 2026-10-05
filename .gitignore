@@ -13,3 +13,8 @@ build/
 轨迹/
 录屏/
 视频/
+
+# 运行期数据
+data/
+app/static/uploads/*
+!app/static/uploads/.gitkeep

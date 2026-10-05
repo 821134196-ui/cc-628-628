@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>镜头租赁 · 序列号核对与暗伤争议系统</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">📷 镜头租赁核对台</div>
+    <nav>
+      <a :class="{on: view==='assets'}" @click="go('assets')">资产库存</a>
+      <a :class="{on: view==='orders'}" @click="go('orders')">订单交接</a>
+      <a :class="{on: view==='wrong'}" @click="loadWrong(); go('wrong')">错还暂扣
+        <span class="badge" v-if="wrongHeldCount">（{{ wrongHeldCount }}）</span>
+      </a>
+    </nav>
+    <div class="operator">
+      当前操作员工：
+      <select v-model.number="operatorId">
+        <option v-for="s in staff" :value="s.id">{{ s.name }}（{{ s.role === 'manager' ? '店长' : '员工' }}）</option>
+      </select>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- ============ 资产库存 ============ -->
+    <section v-if="view==='assets'">
+      <h2>资产库存（逐序列号管理）</h2>
+      <div class="card">
+        <h3>登记新设备</h3>
+        <div class="form-row">
+          <input v-model="newAsset.serial_number" placeholder="序列号 SN-xxx">
+          <select v-model="newAsset.asset_type">
+            <option value="camera">机身</option>
+            <option value="lens">镜头</option>
+          </select>
+          <input v-model="newAsset.brand" placeholder="品牌">
+          <input v-model="newAsset.model" placeholder="型号">
+          <button @click="createAsset">登记入库</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="filters">
+          <button :class="{on: assetFilter===''}" @click="assetFilter=''">全部</button>
+          <button :class="{on: assetFilter==='available'}" @click="assetFilter='available'">可租</button>
+          <button :class="{on: assetFilter==='rented'}" @click="assetFilter='rented'">在租</button>
+          <button :class="{on: assetFilter==='disputed'}" @click="assetFilter='disputed'">争议冻结</button>
+          <button :class="{on: assetFilter==='damaged'}" @click="assetFilter='damaged'">确认损坏</button>
+          <button :class="{on: assetFilter==='wrong_held'}" @click="assetFilter='wrong_held'">错还暂扣</button>
+          <button @click="loadAssets">刷新</button>
+        </div>
+        <table>
+          <thead><tr><th>序列号</th><th>类型</th><th>品牌</th><th>型号</th><th>状态</th></tr></thead>
+          <tbody>
+            <tr v-for="a in filteredAssets" :key="a.id">
+              <td class="mono">{{ a.serial_number }}</td>
+              <td>{{ a.asset_type === 'camera' ? '机身' : '镜头' }}</td>
+              <td>{{ a.brand }}</td><td>{{ a.model }}</td>
+              <td><span class="tag" :class="'st-'+a.status">{{ assetStatusText(a.status) }}</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ 订单列表 / 新建出库 ============ -->
+    <section v-if="view==='orders' && !currentOrder">
+      <h2>订单与出库交接</h2>
+      <div class="card">
+        <h3>新建订单 · 按序列号逐件出库</h3>
+        <div class="form-row">
+          <input v-model="newOrder.customer_name" placeholder="客户姓名">
+          <input v-model="newOrder.customer_phone" placeholder="联系电话">
+          <input v-model.number="newOrder.deposit_required" placeholder="押金金额" type="number" style="width:120px">
+        </div>
+        <table class="mini">
+          <thead><tr><th>序列号</th><th>对焦测试</th><th>备注</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="(it, i) in newOrder.items" :key="i">
+              <td><input v-model="it.serial_number" placeholder="扫描/输入序列号" class="mono"></td>
+              <td><select v-model="it.focus_test">
+                <option value="normal">正常</option><option value="slow">偏慢</option>
+                <option value="fail">失败</option>
+              </select></td>
+              <td><input v-model="it.notes" placeholder="外观/功能备注"></td>
+              <td><button class="danger" @click="newOrder.items.splice(i,1)">删除</button></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="form-row">
+          <button @click="newOrder.items.push({serial_number:'', focus_test:'normal', notes:''})">+ 添加部件</button>
+          <input v-model="newOrder.note" placeholder="交接备注" style="flex:1">
+          <button class="primary" @click="createOrder">办理出库（员工 {{ operatorName }}）</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <table>
+          <thead><tr><th>订单号</th><th>客户</th><th>押金</th><th>状态</th><th>部件</th><th>已付/冻结/扣减</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="o in orders" :key="o.id">
+              <td class="mono">{{ o.order_no }}</td>
+              <td>{{ o.customer_name }}</td>
+              <td>¥{{ o.deposit_required }}</td>
+              <td><span class="tag" :class="'os-'+o.status">{{ orderStatusText(o.status) }}</span></td>
+              <td>{{ o.line_count }} 件</td>
+              <td class="mono small">¥{{ o.balances.paid }} / ¥{{ o.balances.frozen }} / ¥{{ o.balances.deducted }}</td>
+              <td><button @click="openOrder(o.id)">打开交接台 →</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ 订单交接台 ============ -->
+    <section v-if="view==='orders' && currentOrder">
+      <button class="back" @click="currentOrder=null">← 返回订单列表</button>
+      <h2>订单 {{ currentOrder.order_no }}
+        <span class="tag" :class="'os-'+currentOrder.status">{{ orderStatusText(currentOrder.status) }}</span>
+      </h2>
+      <p class="sub">客户：{{ currentOrder.customer_name }} {{ currentOrder.customer_phone }} ｜ 应付押金 ¥{{ currentOrder.deposit_required }}</p>
+
+      <div class="grid2">
+        <!-- 押金 -->
+        <div class="card">
+          <h3>押金账本（模拟支付通道）</h3>
+          <div class="bal">
+            <div><b>已付</b><span>¥{{ currentOrder.balances.paid }}</span></div>
+            <div><b>可用</b><span>¥{{ currentOrder.balances.available }}</span></div>
+            <div class="warn"><b>冻结</b><span>¥{{ currentOrder.balances.frozen }}</span></div>
+            <div class="danger-txt"><b>已扣减</b><span>¥{{ currentOrder.balances.deducted }}</span></div>
+            <div><b>已退</b><span>¥{{ currentOrder.balances.refunded }}</span></div>
+          </div>
+          <div class="form-row">
+            <button class="primary" @click="payDeposit">模拟支付押金 ¥{{ currentOrder.deposit_required }}</button>
+            <button @click="refundDeposit" :disabled="currentOrder.status==='settled'">结清并退还余款</button>
+          </div>
+          <table class="mini ledger">
+            <thead><tr><th>类型</th><th>金额</th><th>原因</th><th>时间</th></tr></thead>
+            <tbody>
+              <tr v-for="t in currentOrder.ledger" :key="t.id">
+                <td><span class="tag" :class="'tx-'+t.txn_type">{{ txnText(t.txn_type) }}</span></td>
+                <td class="mono">¥{{ t.amount }}</td>
+                <td class="small">{{ t.reason }}</td>
+                <td class="small">{{ t.created_at }}</td>
+              </tr>
+              <tr v-if="!currentOrder.ledger.length"><td colspan="4" class="empty">暂无记录（收回设备与押金结算分别留痕）</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- 归还 -->
+        <div class="card">
+          <h3>归还扫描 · 逐件与出库记录对照</h3>
+          <table class="mini">
+            <thead><tr><th>序列号</th><th>结果</th><th>对焦</th><th>冻结额</th><th>备注</th><th></th></tr></thead>
+            <tbody>
+              <tr v-for="(it, i) in returnForm.items" :key="i">
+                <td><input v-model="it.serial_number" class="mono" placeholder="扫描序列号"></td>
+                <td><select v-model="it.result">
+                  <option value="pass">完好</option><option value="fail">发现暗伤</option>
+                </select></td>
+                <td><select v-model="it.focus_test">
+                  <option value="normal">正常</option><option value="slow">偏慢</option>
+                  <option value="fail">失败</option>
+                </select></td>
+                <td><input v-model.number="it.hold_amount" type="number" style="width:90px"
+                           :disabled="it.result!=='fail'" :placeholder="it.result==='fail' ? '0' : ''"></td>
+                <td><input v-model="it.notes" :placeholder="it.result==='fail' ? '暗伤描述' : ''"></td>
+                <td><button class="danger" @click="returnForm.items.splice(i,1)">×</button></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="form-row">
+            <button @click="returnForm.items.push({serial_number:'', result:'pass', focus_test:'normal', notes:'', hold_amount:0})">+ 扫描一件</button>
+            <input v-model="returnForm.note" placeholder="归还备注" style="flex:1">
+            <button class="primary" @click="submitReturn">提交归还核对</button>
+          </div>
+
+          <!-- 临时换件 -->
+          <h3 style="margin-top:14px">套装临时换件（重新办理交接）</h3>
+          <div class="form-row">
+            <input v-model="replaceForm.out_serial" class="mono" placeholder="交回旧件 SN">
+            <span>→</span>
+            <input v-model="replaceForm.in_serial" class="mono" placeholder="换出新件 SN">
+          </div>
+          <div class="form-row">
+            <select v-model="replaceForm.out_result">
+              <option value="pass">旧件完好</option><option value="fail">旧件有暗伤</option>
+            </select>
+            <select v-model="replaceForm.out_focus_test">
+              <option value="normal">旧件对焦正常</option><option value="slow">偏慢</option><option value="fail">失败</option>
+            </select>
+            <select v-model="replaceForm.in_focus_test">
+              <option value="normal">新件对焦正常</option><option value="slow">偏慢</option><option value="fail">失败</option>
+            </select>
+            <input v-model="replaceForm.note" placeholder="换件原因" style="flex:1">
+            <button @click="submitReplace">办理换件交接</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 交接批次时间线 -->
+      <div class="card">
+        <h3>交接批次（换件产生新批次，证据可追溯到当次出库员工）</h3>
+        <div class="timeline">
+          <div v-for="e in currentOrder.checkout_events" :key="e.id" class="tl-item">
+            <b>第 {{ e.seq }} 次交接</b> · 出库员工 {{ e.staff.name }} · {{ e.created_at }}
+            <span class="small" v-if="e.note">｜{{ e.note }}</span>
+          </div>
+        </div>
+        <div class="small" v-for="re in currentOrder.return_events" :key="'r'+re.id" style="margin-top:4px">
+          ↩ 归还批次 · 经手 {{ re.staff.name }} · {{ re.created_at }} <span v-if="re.note">｜{{ re.note }}</span>
+        </div>
+      </div>
+
+      <!-- 争议复检 -->
+      <div class="card" v-if="currentOrder.disputes.length">
+        <h3>暗伤争议与独立复检</h3>
+        <div v-for="d in currentOrder.disputes" :key="d.id" class="dispute">
+          <div class="dispute-head">
+            <span class="mono">{{ d.serial_number }}</span>
+            <span class="tag" :class="'ds-'+d.status">{{ disputeStatusText(d.status) }}</span>
+            上报人：{{ d.reporter.name }} ｜ 原出库员工：<b>{{ d.checkout_staff.name }}</b>
+            ｜ 建议冻结 ¥{{ d.hold_amount }}
+            <span class="small">｜{{ d.description }}</span>
+          </div>
+
+          <div v-if="d.status==='open'" class="recheck-box">
+            <p class="warn-txt" v-if="operatorId===d.checkout_staff.id">
+              ⚠ 你是该部件的原出库员工，独立复检将被系统拒绝（403），请切换其他员工。
+            </p>
+            <div class="form-row">
+              <span>复检人：{{ operatorName }}</span>
+              <select v-model="recheckForms[d.id].result">
+                <option value="confirmed">确认暗伤</option>
+                <option value="rejected">驳回（无暗伤）</option>
+              </select>
+              <input v-model="recheckForms[d.id].notes" placeholder="复检说明" style="flex:1">
+              <button class="primary" @click="submitRecheck(d)">提交独立复检</button>
+            </div>
+          </div>
+
+          <div v-if="d.status==='confirmed'" class="quote-box">
+            <h4>报价与扣减原因（逐项展示）</h4>
+            <table class="mini">
+              <thead><tr><th>原因</th><th>金额</th></tr></thead>
+              <tbody>
+                <tr v-for="q in d.quotes" :key="q.id"><td>{{ q.reason }}</td><td class="mono">¥{{ q.amount }}</td></tr>
+              </tbody>
+            </table>
+            <div class="form-row">
+              <input v-model="quoteForms[d.id].reason" placeholder="扣减项目，如：前组镜片划伤抛光">
+              <input v-model.number="quoteForms[d.id].amount" type="number" placeholder="金额" style="width:120px">
+              <button @click="addQuote(d)">+ 添加报价项</button>
+              <button class="danger" @click="deduct(d)" :disabled="!d.quotes.length">执行扣减（{{ d.quotes.length }} 项，¥{{ quoteTotal(d) }}）</button>
+              <button @click="deduct(d, true)" :disabled="!d.quotes.length">重复发送扣款请求（幂等验证）</button>
+            </div>
+          </div>
+          <div v-if="d.status==='settled'" class="ok-txt">✔ 已结清：
+            <span v-for="q in d.quotes" :key="q.id">【{{ q.reason }} ¥{{ q.amount }}】 </span>
+          </div>
+          <div v-if="d.status==='rejected'" class="ok-txt">✔ 复检驳回，冻结已解除，设备恢复可租。</div>
+        </div>
+      </div>
+
+      <!-- 逐件证据并排（客户页面） -->
+      <div class="card">
+        <h3>客户证据页 · 同一序列号出库/归还前后对照</h3>
+        <div v-for="ln in currentOrder.lines" :key="ln.id" class="evidence-line">
+          <div class="ev-head">
+            <span class="mono big">{{ ln.asset.serial_number }}</span>
+            <span class="small">{{ ln.asset.brand }} {{ ln.asset.model }}
+              （{{ ln.asset.asset_type === 'camera' ? '机身' : '镜头' }}）</span>
+            <span class="tag" :class="'ls-'+ln.status">{{ lineStatusText(ln.status) }}</span>
+            <span class="small" v-if="ln.status==='replaced'">已由第 {{ nextLine(ln)?.checkout_event_seq }} 次交接的
+              {{ nextLine(ln)?.asset.serial_number }} 替换</span>
+            <span class="small" v-if="ln.replaced_by_line_id"></span>
+          </div>
+          <div class="ev-grid">
+            <div class="ev-col">
+              <h4>出库证据 · 第{{ ln.checkout_event_seq }}次交接 · {{ ln.checkout_staff.name }}</h4>
+              <div v-for="c in ln.checkout_checks" :key="c.id" class="check-block">
+                <p class="small">对焦测试：{{ focusText(c.focus_test) }} ｜ {{ c.created_at }} ｜ {{ c.notes }}</p>
+                <div class="photos">
+                  <div v-for="p in c.photos" :key="p.id" class="photo">
+                    <a :href="p.url" target="_blank"><img :src="p.url" :alt="p.label"></a>
+                    <span class="small">{{ p.label || '外观照' }}</span>
+                  </div>
+                  <label class="upload-slot">
+                    <input type="file" accept="image/*" @change="uploadPhoto(c.id, $event)" hidden>
+                    ＋ 上传外观照
+                  </label>
+                </div>
+              </div>
+              <p v-if="!ln.checkout_checks.length" class="empty">无</p>
+            </div>
+            <div class="ev-col">
+              <h4>归还 / 复检证据</h4>
+              <div v-for="c in ln.return_checks" :key="c.id" class="check-block">
+                <p class="small">
+                  <span class="tag" :class="c.check_type==='recheck' ? 'ds-rejected' : (c.result==='fail' ? 'ls-disputed' : 'ls-returned_ok')">
+                    {{ c.check_type === 'recheck' ? '复检·'+(c.result==='fail'?'确认暗伤':'驳回') : '归还·'+(c.result==='fail'?'暗伤':'完好') }}
+                  </span>
+                  员工 {{ c.staff.name }} ｜ 对焦：{{ focusText(c.focus_test) }} ｜ {{ c.created_at }} ｜ {{ c.notes }}
+                </p>
+                <div class="photos">
+                  <div v-for="p in c.photos" :key="p.id" class="photo">
+                    <a :href="p.url" target="_blank"><img :src="p.url" :alt="p.label"></a>
+                    <span class="small">{{ p.label || '外观照' }}</span>
+                  </div>
+                  <label class="upload-slot">
+                    <input type="file" accept="image/*" @change="uploadPhoto(c.id, $event)" hidden>
+                    ＋ 上传外观照
+                  </label>
+                </div>
+              </div>
+              <p v-if="!ln.return_checks.length" class="empty">尚未归还 / 待核对</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 错还暂扣 ============ -->
+    <section v-if="view==='wrong'">
+      <h2>错还设备暂扣区</h2>
+      <div class="card">
+        <p class="warn-txt">被拦截设备一律暂扣，<b>不会进入可用库存</b>；核实去向后由员工解除暂扣。</p>
+        <table>
+          <thead><tr><th>扫描序列号</th><th>匹配设备状态</th><th>来源订单</th><th>经手人</th><th>原因</th><th>时间</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-for="w in wrongReturns" :key="w.id">
+              <td class="mono">{{ w.scanned_sn }}</td>
+              <td><span v-if="w.matched_asset" class="tag" :class="'st-'+w.matched_asset.status">{{ assetStatusText(w.matched_asset.status) }}</span><span v-else>库中无此序列号</span></td>
+              <td class="mono">#{{ w.order_id }}</td>
+              <td>{{ w.staff.name }}</td>
+              <td class="small">{{ w.note }}</td>
+              <td class="small">{{ w.created_at }}</td>
+              <td><button @click="releaseWrong(w)" :disabled="!w.held">核实退暂扣</button></td>
+            </tr>
+            <tr v-if="!wrongReturns.length"><td colspan="7" class="empty">暂无暂扣设备</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div v-if="toast" class="toast" :class="toast.type">{{ toast.text }}</div>
+</div>
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
